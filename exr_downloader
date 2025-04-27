@@ -1,0 +1,209 @@
+# exr_downloader.py - Improved version for compatibility with DiffusionLight
+
+import os
+import time
+import json
+from datetime import datetime
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import io
+import numpy as np
+import re
+
+
+
+# Set environment variable for OpenCV if you're using it
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+
+# Configuration settings
+OUTPUT_FOLDER_ID = '1jjFVzdi58sOUey4UpDDb-PBkgsoOHwzT'  # Your output folder ID
+LOCAL_DOWNLOAD_DIR = 'C:\\Users\\Mahad\\Downloads\\EXR_Files'  # Where to save downloaded files
+TRACKING_FILE = 'downloaded_files.json'  # File to track which files we've already downloaded
+CHECK_INTERVAL = 60  # Seconds between checks
+SCOPES = ['https://www.googleapis.com/auth/drive.readonly']  # Read-only access
+
+def authenticate():
+    """Authenticate with Google Drive API"""
+    creds = None
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'C:\\Users\\Mahad\\Downloads\\credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+    return creds
+
+def load_tracking_data():
+    """Load list of previously downloaded files"""
+    if os.path.exists(TRACKING_FILE):
+        with open(TRACKING_FILE, 'r') as f:
+            return json.load(f)
+    return {'downloaded_files': [], 'last_check': None}
+
+def save_tracking_data(data):
+    """Save updated tracking data"""
+    with open(TRACKING_FILE, 'w') as f:
+        json.dump(data, f)
+
+def is_valid_exr(file_path):
+    """Check if the file is a valid EXR file"""
+    try:
+        # Try multiple methods to validate EXR format
+        
+        # Method 1: Check file signature (EXR files start with bytes 76, 47, 1, 2)
+        with open(file_path, 'rb') as f:
+            magic = f.read(4)
+            if magic != b'\x76\x2f\x01\x02':
+                print(f"File {file_path} has invalid EXR signature")
+                return False
+                
+        # Method 2: Try to open with OpenEXR if available
+        try:
+            import OpenEXR
+            exr_file = OpenEXR.InputFile(file_path)
+            exr_file.close()
+        except ImportError:
+            print("OpenEXR module not available, skipping detailed validation")
+        except Exception as e:
+            print(f"OpenEXR validation failed: {str(e)}")
+            return False
+            
+        return True
+    except Exception as e:
+        print(f"Error validating EXR file {file_path}: {str(e)}")
+        return False
+
+def download_file(service, file_id, file_name):
+    """Download a file from Google Drive"""
+    request = service.files().get_media(fileId=file_id)
+    file_path = os.path.join(LOCAL_DOWNLOAD_DIR, file_name)
+    
+    with io.BytesIO() as fh:
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        
+        print(f"\nDownloading {file_name}...")
+        while not done:
+            status, done = downloader.next_chunk()
+            print(f"Progress: {int(status.progress() * 100)}%", end="\r")
+        
+        # Write to file
+        with open(file_path, 'wb') as f:
+            f.write(fh.getvalue())
+    
+    # Validate the downloaded EXR file
+    if not file_name.lower().endswith('.exr') or is_valid_exr(file_path):
+        print(f"\nDownloaded and validated: {file_name} to {file_path}")
+        return file_path
+    else:
+        print(f"\nWarning: Downloaded file {file_path} is not a valid EXR file")
+        # Attempt to repair by adding proper EXR header if missing
+        try:
+            repair_exr_file(file_path)
+            return file_path
+        except:
+            print(f"Could not repair EXR file {file_path}")
+            return None
+
+def repair_exr_file(file_path):
+    """Attempt to repair a corrupted EXR file"""
+    # This is a simplified repair - for serious corruption, more advanced techniques would be needed
+    with open(file_path, 'rb') as f:
+        data = f.read()
+    
+    # If file doesn't start with EXR signature, add it
+    if not data.startswith(b'\x76\x2f\x01\x02'):
+        with open(file_path, 'wb') as f:
+            f.write(b'\x76\x2f\x01\x02' + data)
+        print(f"Added EXR signature to {file_path}")
+
+def check_for_new_files(service, tracking_data):
+    """Check for new EXR files in the output folder"""
+    # Create query to find EXR files in the output folder
+    # Note: Google Drive doesn't reliably detect EXR by MIME type, so we search by name
+    query = f"'{OUTPUT_FOLDER_ID}' in parents and name contains '.exr' and trashed=false"
+    
+    # Optional: limit to files created after last check
+    if tracking_data.get('last_check'):
+        query += f" and createdTime > '{tracking_data['last_check']}'"
+    
+    # Execute the query
+    results = service.files().list(
+        q=query,
+        spaces='drive',
+        fields="files(id, name, createdTime, modifiedTime)",
+        orderBy="createdTime desc"
+    ).execute()
+    
+    # Update last check time
+    tracking_data['last_check'] = datetime.utcnow().isoformat() + 'Z'  # RFC 3339 format
+    
+    # Get list of files
+    files = results.get('files', [])
+    
+    # Determine which files are new
+    downloaded_ids = set(tracking_data['downloaded_files'])
+    new_files = [f for f in files if f['id'] not in downloaded_ids]
+    
+    return new_files
+
+def main():
+    """Main function to periodically check for and download new EXR files"""
+    # Ensure download directory exists
+    os.makedirs(LOCAL_DOWNLOAD_DIR, exist_ok=True)
+    
+    # Load tracking data
+    tracking_data = load_tracking_data()
+    
+    # Authenticate and build service
+    creds = authenticate()
+    service = build('drive', 'v3', credentials=creds)
+    
+    print(f"EXR Downloader initialized. Checking folder with ID: {OUTPUT_FOLDER_ID}")
+    print(f"Files will be saved to: {LOCAL_DOWNLOAD_DIR}")
+    print(f"Checking every {CHECK_INTERVAL} seconds. Press Ctrl+C to stop.")
+    
+    try:
+        while True:
+            # Check for new files
+            print("\nChecking for new EXR files...", end=" ")
+            new_files = check_for_new_files(service, tracking_data)
+            
+            if not new_files:
+                print("No new files found.")
+            else:
+                print(f"Found {len(new_files)} new files.")
+                
+                # Download each new file
+                for file in new_files:
+                    try:
+                        file_path = download_file(service, file['id'], file['name'])
+                        if file_path:
+                            # Add to downloaded list
+                            tracking_data['downloaded_files'].append(file['id'])
+                    except Exception as e:
+                        print(f"Error downloading {file['name']}: {str(e)}")
+                
+                # Save updated tracking data
+                save_tracking_data(tracking_data)
+            
+            # Wait before checking again
+            print(f"Next check in {CHECK_INTERVAL} seconds...", end="\r")
+            time.sleep(CHECK_INTERVAL)
+    
+    except KeyboardInterrupt:
+        print("\n\nDownloader stopped by user.")
+        # Save tracking data before exiting
+        save_tracking_data(tracking_data)
+        print(f"Downloaded {len(tracking_data['downloaded_files'])} files in total.")
+
+if __name__ == "__main__":
+    main()
