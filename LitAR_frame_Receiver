@@ -1,0 +1,39 @@
+import asyncio
+import base64
+import json
+import cv2
+import numpy as np
+from PIL import Image
+from io import BytesIO
+import websockets
+
+async def handler(ws, path=None):
+    print("Client connected")
+    async for msg in ws:
+        print("Frame received")
+        try:
+            data = json.loads(msg)
+            rgb_b64 = data.get("rgb_image", "")
+            print("RGB len:", len(rgb_b64))
+            if not rgb_b64:
+                print("No RGB data—skipping")
+                continue
+
+            # Decode and save
+            arr = np.array(Image.open(BytesIO(base64.b64decode(rgb_b64))).convert("RGB"))
+            print("Decoded RGB shape:", arr.shape)
+            cv2.imwrite("received.png", cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
+            print("Saved received.png")
+
+        except Exception as e:
+            print("Error parsing or decoding:", e)
+
+    print("Client disconnected")
+
+async def main():
+    async with websockets.serve(handler, "0.0.0.0", 8080, max_size=None):
+        print("WebSocket server listening on port 8080")
+        await asyncio.Future()  # run forever
+
+if __name__ == "__main__":
+    asyncio.run(main())
