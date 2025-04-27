@@ -1,0 +1,57 @@
+# local_uploader.py
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
+import os
+import time
+
+# Authentication setup
+SCOPES = ['https://www.googleapis.com/auth/drive.file']
+# Input folder ID - this is where files will be uploaded
+INPUT_FOLDER_ID = '1ZQkm44d6qBNBlX-tgHa0pei5Le_CqDqO'
+
+def authenticate():
+    creds = None
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'C:\\Users\\Mahad\\Downloads\\credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+    return creds
+
+def upload_to_drive(file_path):
+    creds = authenticate()
+    service = build('drive', 'v3', credentials=creds)
+    
+    # Add the parents field to specify the destination folder
+    file_metadata = {
+        'name': os.path.basename(file_path),
+        'parents': [INPUT_FOLDER_ID]  # Specify the folder ID here
+    }
+    media = MediaFileUpload(file_path)
+    
+    file = service.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields='id'
+    ).execute()
+    
+    return file.get('id')
+
+if __name__ == '__main__': 
+    for i in range(1, 10):  
+        image_path = f"C:\\Users\\Mahad\\Downloads\\wall-{i}.jpg"
+        file_id = upload_to_drive(image_path)
+        print(f"Uploaded {image_path} with file id: {file_id}")
+        print(f"View in folder: https://drive.google.com/drive/folders/{INPUT_FOLDER_ID}")
+        # Optional: add a small delay between uploads to avoid rate limits
+        time.sleep(1)
