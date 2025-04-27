@@ -1,0 +1,88 @@
+using System;
+using System.Collections;
+using System.Threading.Tasks;
+using UnityEngine;
+using UnityEngine.XR.ARFoundation;
+using UnityEngine.XR.ARSubsystems;
+using NativeWebSocket;
+using Unity.Collections.LowLevel.Unsafe;
+
+public class ARFrameSender : MonoBehaviour
+{
+    public ARCameraManager cameraManager;
+    public float captureInterval = 1f;
+    private WebSocket websocket;
+
+    void Start()
+    {
+        // Point this to your Python server
+        websocket = new WebSocket("ws://172.16.124.130:8080");
+
+        websocket.OnOpen  += () => Debug.Log("WebSocket connection open!");
+        websocket.OnError += e  => Debug.Log("WebSocket error: " + e);
+        websocket.OnClose += e  => Debug.Log("WebSocket connection closed!");
+
+        websocket.Connect();
+        StartCoroutine(CaptureFrameCoroutine());
+    }
+
+    IEnumerator CaptureFrameCoroutine()
+    {
+        while (true)
+        {
+            yield return new WaitForEndOfFrame();
+            _ = CaptureAndSendFrame();      // fire-and-forget
+            yield return new WaitForSeconds(captureInterval);
+        }
+    }
+
+    async Task CaptureAndSendFrame()
+    {
+        if (!cameraManager.TryAcquireLatestCpuImage(out XRCpuImage cpuImage))
+            return;
+
+        var convParams = new XRCpuImage.ConversionParams
+        {
+            inputRect       = new RectInt(0, 0, cpuImage.width, cpuImage.height),
+            outputDimensions= new Vector2Int(cpuImage.width, cpuImage.height),
+            outputFormat    = TextureFormat.RGBA32,
+            transformation  = XRCpuImage.Transformation.MirrorY
+        };
+
+        var tex = new Texture2D(cpuImage.width, cpuImage.height, TextureFormat.RGBA32, false);
+        var raw = tex.GetRawTextureData<byte>();
+        unsafe
+        {
+            byte* ptr = (byte*)NativeArrayUnsafeUtility.GetUnsafePtr(raw);
+            cpuImage.Convert(convParams, new IntPtr(ptr), raw.Length);
+        }
+        cpuImage.Dispose();
+        tex.Apply();
+
+        byte[] png = tex.EncodeToPNG();
+        string rgb_b64 = Convert.ToBase64String(png);
+        Destroy(tex);
+
+        var payload = new { rgb_image = rgb_b64 };
+        string json = JsonUtility.ToJson(payload);
+
+        Debug.Log($"JSON length: {json.Length}");
+        if (websocket.State == WebSocketState.Open)
+        {
+            await websocket.SendText(json);
+            Debug.Log("Frame sent");
+        }
+    }
+
+    void Update()
+    {
+#if !UNITY_WEBGL || UNITY_EDITOR
+        websocket.DispatchMessageQueue();
+#endif
+    }
+
+    async void OnApplicationQuit()
+    {
+        await websocket.Close();
+    }
+}
